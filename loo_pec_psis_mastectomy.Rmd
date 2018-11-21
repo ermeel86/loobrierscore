@@ -9,6 +9,12 @@ output:
 
 ---
 
+In this document we show how to implement a leave-one-out version of the so-called "inverse of probability of censoring weighted estimator" (below referred to as Brier Score) for time dependent prediction accuracy of Bayesian survival models.
+
+We use Pareto-Smoothed importance sampling here in order to avoid re-running the Bayesian analysis for any leave-one-out instance.
+
+We provide an efficient implementation written in Stan and exposed to R.
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(rstan);rstan_options(auto_write = TRUE)
@@ -196,11 +202,12 @@ survs_loo1 <- surv_const_loo(times_pec,
                             matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
                             t(w)
                             )
-survs1 <- surv_const(times_pec, 
-                     X, 
-                     summary(fit)$summary["intercept", "mean"], 
-                     summary(fit)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]
-)
+survs1 <- surv_const_loo(times_pec,
+                            X,
+                            as.vector(post[,,"intercept"]),
+                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
+                            matrix(rep(1, dim(w)[1]*dim(w)[2]), nrow = dim(w)[2], byrow = T)/dim(w)[1]
+                            )
 ```
 
 ```{r, echo=FALSE}
@@ -215,15 +222,16 @@ survs_loo2 <- surv_mspline_loo(i_spline_basis_evals,
                             matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
                             as.vector(post2[,,"intercept"]),
                             matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
-                            t(w)
+                            t(w2)
                             )
 
-survs2 <- surv_mspline(i_spline_basis_evals,
-                       X,
-                      summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis), "mean"],                
-                      summary(fit2)$summary["intercept", "mean"], 
-                      summary(fit2)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]                       
-                       )
+survs2 <- surv_mspline_loo(i_spline_basis_evals,
+                            X,
+                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
+                            as.vector(post2[,,"intercept"]),
+                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
+                            matrix(rep(1, dim(w2)[1]*dim(w2)[2]), nrow = dim(w2)[2], byrow = T)/dim(w2)[1]
+                            )
 ```
 
 ```{r, echo=FALSE}
