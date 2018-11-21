@@ -1,0 +1,16 @@
+\documentclass[11pt]{report}
+
+\begin{document}
+
+$$
+S_i(t\vert \mathbf{T}_{-i}) \approx \frac{\sum_{s=1}^S r_{s,i} S_i(t\vert \theta_s)}{\sum_{s=1}^S r_{s,i}}
+$$
+with
+$$
+r_{s,i} \equiv \frac{1}{p(T_i\vert \theta_s)}
+$$
+
+$$
+\eta_{i,t} \equiv \left\{ \mathds{1}_{\{T_i > t\}} - S_i(t\vert \mathbf{T}_{-i})\right\}^2
+$$
+\end{document}

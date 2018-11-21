@@ -1,0 +1,322 @@
+---
+title: "Leave-One-Out Brier Score for survival models"
+subtitle: "Using Pareto smoothed importance sampling"
+author: "Eren M. El&ccedil;i"
+date: "2018-11-21"
+output:
+  tufte::tufte_html: default
+  tufte::tufte_handout: default
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan);rstan_options(auto_write = TRUE)
+library(loo)
+library(survival)
+library(tibble)
+library(dplyr)
+library(purrr)
+library(bayesplot)
+library(splines2)
+library(pec)
+library(HSAUR)
+library(cowplot)
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+expose_stan_functions("~/Desktop/Stan/Loo_Pec/utils_surv.stan")
+sm <- stan_model("~/Desktop/Stan/Loo_Pec/exponential_survival_simple_ppc_cond_loo.stan")
+sm2 <- stan_model("~/Desktop/Stan/Loo_Pec/survival_parametric_baseline_hazard_simplex_loo.stan")
+data("mastectomy")
+df <- as.tibble(mastectomy)
+df <- df %>% mutate(metastized=as.double(metastized=="yes"))
+```
+
+```{r inspect, echo=FALSE}
+knitr::kable(
+  df, caption = 'A mastectomy dataset'
+)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+N <- nrow(df)
+X <- as.matrix(as.integer(pull(df, metastized))-1)
+is_censored <- pull(df,event)==0
+times <- pull(df,time)
+msk_censored <- is_censored == 1
+N_censored <- sum(msk_censored)
+
+time_range <- range(times)
+time_min <- time_range[1]
+time_max <- time_range[2] #time_range[2]
+
+knots <- quantile(times[!msk_censored], probs = c(.05, .35, .65, .95))
+
+nknots <- length(knots)
+mspline_degree<- 3
+i_spline_basis_evals <- iSpline(times, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+m_spline_basis_evals <- deriv(i_spline_basis_evals)
+i_spline_basis_evals_censored <- i_spline_basis_evals[msk_censored,]
+i_spline_basis_evals_uncensored <- i_spline_basis_evals[!msk_censored,]
+m_spline_basis_evals_uncensored <- m_spline_basis_evals[!msk_censored,]
+nbasis <- dim(i_spline_basis_evals_censored)[2]
+
+
+
+
+stan_data <- list(N_uncensored=N-N_censored, 
+                  N_censored=N_censored, 
+                  X_censored=as.matrix(X[msk_censored,]),
+                  X_uncensored=as.matrix(X[!msk_censored,]),
+                  times_censored=times[msk_censored],
+                  times_uncensored = times[!msk_censored],
+                  NC=ncol(X),
+                  m=nbasis,
+                  m_spline_basis_evals_uncensored=m_spline_basis_evals_uncensored, 
+                  i_spline_basis_evals_uncensored=i_spline_basis_evals_uncensored,
+                  i_spline_basis_evals_censored=i_spline_basis_evals_censored
+)
+
+fit <- sampling(sm, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
+fit2 <- sampling(sm2, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
+
+post <- as.array(fit)
+post2 <- as.array(fit2)
+```
+
+
+## Loo
+
+```{r loo, echo=TRUE}
+log_lik_1 <- extract_log_lik(fit, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik_1)) 
+loo_1 <- loo(log_lik_1, r_eff = r_eff, cores = 2)
+print(loo_1)
+
+log_lik_2 <- extract_log_lik(fit2, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik_2)) 
+loo_2 <- loo(log_lik_2, r_eff = r_eff, cores = 2)
+print(loo_2)
+comp <- compare(loo_1, loo_2)
+
+print(comp)
+```
+
+## Survival curves
+
+## M-Splines
+
+```{r surv, echo=FALSE}
+intercept = summary(fit2)$summary["intercept", "mean"]
+betas = summary(fit2)$summary["betas[1]", "mean"]
+gammas = summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis),"mean"]
+X_surv = as.matrix(c(0,1))
+
+times_plot <- seq(0, time_max, length.out = 100)
+i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+
+survs <- surv_mspline(i_spline_basis_evals, X_surv, gammas, intercept, betas)
+
+surv_df <- as.tibble(t(survs)) %>%
+  mutate(t=times_plot) %>%
+  rename(x0=V1, x1=V2)
+
+surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
+                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
+knitr::kable(
+  head(surv_df,10)
+)
+
+ggplot(data=surv_df) + 
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+```
+
+## Constant
+
+```{r surv_constant, echo=FALSE}
+intercept = summary(fit)$summary["intercept", "mean"]
+betas = summary(fit)$summary["betas[1]", "mean"]
+X_surv = as.matrix(c(0,1))
+
+times_plot <- seq(0, time_max, length.out = 100)
+
+
+survs <- surv_const(times_plot, X_surv, intercept, betas)
+
+surv_df <- as.tibble(t(survs)) %>%
+  mutate(t=times_plot) %>%
+  rename(x0=V1, x1=V2)
+
+surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
+                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
+knitr::kable(
+  head(surv_df,10)
+)
+
+ggplot(data=surv_df) + 
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+```
+
+## Brier Score (LOO-PSIS)
+
+$$
+S_i(t\vert \mathbf{T}_{-i}) \approx \frac{\sum_{s=1}^S r_{s,i} S_i(t\vert \theta_s)}{\sum_{s=1}^S r_{s,i}}
+$$
+
+with
+
+$$
+r_{s,i} \equiv \frac{1}{p(T_i\vert \theta_s)}
+$$
+
+$$
+\eta_{i,t} \equiv \left\{ 1_{\{T_i > t\}} - S_i(t\vert \mathbf{T}_{-i})\right\}^2
+$$
+
+Based on the residuals $\eta_{i,t}$ using the `pec` R Package, we calculate the so-called inverse of probability of censoring weighted estimator (below referred to as Brier Score)
+
+```{r, echo=FALSE}
+times_pec <- seq(0, time_max, length.out = 100)
+log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
+r_eff <- relative_eff(exp(log_ratios))
+psis_result <- psis(log_ratios, r_eff = r_eff)
+w <- weights(psis_result, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
+survs_loo1 <- surv_const_loo(times_pec,
+                            X,
+                            as.vector(post[,,"intercept"]),
+                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
+                            t(w)
+                            )
+survs1 <- surv_const(times_pec, 
+                     X, 
+                     summary(fit)$summary["intercept", "mean"], 
+                     summary(fit)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]
+)
+```
+
+```{r, echo=FALSE}
+i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
+r_eff2 <- relative_eff(exp(log_ratios2))
+psis_result2 <- psis(log_ratios2, r_eff = r_eff2)
+w2 <- weights(psis_result2, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
+survs_loo2 <- surv_mspline_loo(i_spline_basis_evals,
+                            X,
+                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
+                            as.vector(post2[,,"intercept"]),
+                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
+                            t(w)
+                            )
+
+survs2 <- surv_mspline(i_spline_basis_evals,
+                       X,
+                      summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis), "mean"],                
+                      summary(fit2)$summary["intercept", "mean"], 
+                      summary(fit2)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]                       
+                       )
+```
+
+```{r, echo=FALSE}
+pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
+                     "Constant-Loo"=survs_loo1,
+                     "MSpline"=survs2,
+                     "Constant"=survs1
+                     ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
+                splitMethod="none",
+                B=0,
+                verbose=TRUE)
+
+df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo")) %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant")) %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline")) %>%
+
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Reference"]], model="Kaplan-Meier"))
+ggplot(data=df_pec) +
+  geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_step(aes(x=time, y=bs, color=model))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  ylab("Brier Score")+
+  xlab("Time")+  
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+
+trsf_bs <- function(m) {
+  dplyr::filter(df_pec, model==m) %>%
+    dplyr::select(time, bs) %>%
+    dplyr::rename(!!paste("bs",m,sep="_") := bs)
+}
+
+knitr::kable(
+purrr::map(unique(df_pec$model),trsf_bs) %>% 
+  purrr::reduce(left_join, by = "time")
+)
+
+```
+
+## Constant only 
+
+```{r, echo=FALSE}
+pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
+                     "Constant"=survs1
+                     ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
+                splitMethod="none",
+                B=0,
+                verbose=TRUE)
+
+df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant"))
+
+ggplot(data=df_pec) +
+  geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
+  geom_step(aes(x=time, y=bs, color=model))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  ylab("Brier Score")+
+  xlab("Time")+  
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+knitr::kable(
+purrr::map(unique(df_pec$model),trsf_bs) %>% 
+  purrr::reduce(left_join, by = "time")
+)
+```
+
+## MSpline only 
+
+```{r, echo=FALSE}
+pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
+                     "MSpline"=survs2
+                     ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
+                splitMethod="none",
+                B=0,
+                verbose=TRUE)
+
+df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo") %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline"))
+
+ggplot(data=df_pec) +
+  geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_step(aes(x=time, y=bs, color=model))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  ylab("Brier Score")+
+  xlab("Time")+  
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+knitr::kable(
+purrr::map(unique(df_pec$model),trsf_bs) %>% 
+  purrr::reduce(left_join, by = "time")
+)
+```
+
