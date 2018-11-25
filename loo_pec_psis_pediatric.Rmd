@@ -25,22 +25,20 @@ cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2"
 expose_stan_functions("~/Desktop/Stan/Loo_Pec/utils_surv.stan")
 sm <- stan_model("~/Desktop/Stan/Loo_Pec/exponential_survival_simple_ppc_cond_loo.stan")
 sm2 <- stan_model("~/Desktop/Stan/Loo_Pec/survival_parametric_baseline_hazard_simplex_loo.stan")
-df <- read.delim("~/Desktop/Stan/Loo_Pec/ncog.txt", sep=' ')
+df <- read.delim("~/Desktop/Stan/Loo_Pec/pediatric.txt", sep=' ')
+df <- mutate(df, time = t*12/365)
 ```
 
-```{r inspect, echo=FALSE}
-df <- df %>% mutate(time = t/365 * 12.) %>% as.tibble()
-```
 
 ```{r inspect, echo=FALSE}
 knitr::kable(
-  head(df,5), caption = 'A mastectomy dataset'
+  head(df,5)
 )
 ```
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
 N <- nrow(df)
-X <- as.matrix(as.integer(pull(df, arm))-1)
+X <- as.matrix(as.integer(pull(df, race))-1)
 is_censored <- pull(df,d)==0
 times <- pull(df,time)
 msk_censored <- is_censored == 1
@@ -49,8 +47,8 @@ N_censored <- sum(msk_censored)
 time_range <- range(times)
 time_min <- time_range[1]
 time_max <- time_range[2] #time_range[2]
-
-knots <- quantile(times[!msk_censored], probs = c(.05, .35, .65, .95))
+ninterior_knots <- 6
+knots <- quantile(times[!msk_censored],head(tail(seq(0,1, length.out = ninterior_knots+2),-1),-1))
 
 nknots <- length(knots)
 mspline_degree<- 3
@@ -123,15 +121,15 @@ surv_df <- as.tibble(t(survs)) %>%
   mutate(t=times_plot) %>%
   rename(x0=V1, x1=V2)
 
-surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(arm="A"), 
-                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(arm="B"))
+surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(race="white"), 
+                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(race="non-white"))
 knitr::kable(
   head(surv_df,10)
 )
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
-  geom_line(mapping=aes(x=t, y=surv, color=arm))+
+  geom_line(mapping=aes(x=t, y=surv, color=race))+
   geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)
@@ -153,15 +151,15 @@ surv_df <- as.tibble(t(survs)) %>%
   mutate(t=times_plot) %>%
   rename(x0=V1, x1=V2)
 
-surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(arm="A"), 
-                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(arm="B"))
+surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(race="white"), 
+                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(race="non-white"))
 knitr::kable(
   head(surv_df,10)
 )
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
-  geom_line(mapping=aes(x=t, y=surv, color=arm))+
+  geom_line(mapping=aes(x=t, y=surv, color=race))+
   geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)
@@ -187,44 +185,47 @@ Based on the residuals $\eta_{i,t}$ using the `pec` R Package, we calculate the 
 
 ```{r, echo=FALSE}
 times_pec <- seq(0, time_max, length.out = 100)
-log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
+iters <- sample(1:2000, 100)
+log_ratios <- -post[iters,1:2,sprintf("log_lik[%d]",1:N)]
 r_eff <- relative_eff(exp(log_ratios))
 psis_result <- psis(log_ratios, r_eff = r_eff)
 w <- weights(psis_result, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
 survs_loo1 <- surv_const_loo(times_pec,
                             X,
-                            as.vector(post[,,"intercept"]),
-                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
+                            as.vector(post[iters,1:2,"intercept"]),
+                            matrix(post[iters,1:2,sprintf("betas[%d]" ,1:ncol(X))], dim(post[iters, 1:2, ])[1]*dim(post[iters, 1:2, ])[2], ncol(X)),
                             t(w)
                             )
 survs1 <- surv_const_loo(times_pec,
                             X,
-                            as.vector(post[,,"intercept"]),
-                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
+                            as.vector(post[iters,1:2,"intercept"]),
+                            matrix(post[iters,1:2,sprintf("betas[%d]" ,1:ncol(X))], dim(post[iters, 1:2, ])[1]*dim(post[iters, 1:2, ])[2], ncol(X)),
                             matrix(rep(1, dim(w)[1]*dim(w)[2]), nrow = dim(w)[2], byrow = T)/dim(w)[1]
                             )
 ```
 
 ```{r, echo=FALSE}
+iters <- sample(1:2000, 100)
+
 i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
-log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
+log_ratios2 <- -post2[iters,1:2,sprintf("log_lik[%d]",1:N)]
 r_eff2 <- relative_eff(exp(log_ratios2))
 psis_result2 <- psis(log_ratios2, r_eff = r_eff2)
 w2 <- weights(psis_result2, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
 survs_loo2 <- surv_mspline_loo(i_spline_basis_evals,
                             X,
-                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
-                            as.vector(post2[,,"intercept"]),
-                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
+                            matrix(post2[iters,1:2,sprintf("gammas[%d]", 1:nbasis)], dim(post2[iters,1:2,])[1]*dim(post2[iters,1:2,])[2], nbasis),
+                            as.vector(post2[iters,1:2,"intercept"]),
+                            matrix(post2[iters,1:2,sprintf("betas[%d]" ,1:ncol(X))], dim(post2[iters,1:2,])[1]*dim(post2[iters,1:2,])[2], ncol(X)),
                             t(w2)
                             )
 
 survs2 <- surv_mspline_loo(i_spline_basis_evals,
                             X,
-                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
-                            as.vector(post2[,,"intercept"]),
-                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
+                            matrix(post2[iters,1:2,sprintf("gammas[%d]", 1:nbasis)], dim(post2[iters,1:2,])[1]*dim(post2[iters,1:2,])[2], nbasis),
+                            as.vector(post2[iters,1:2,"intercept"]),
+                            matrix(post2[iters,1:2,sprintf("betas[%d]" ,1:ncol(X))], dim(post2[iters,1:2,])[1]*dim(post2[iters, 1:2,])[2], ncol(X)),
                             matrix(rep(1, dim(w2)[1]*dim(w2)[2]), nrow = dim(w2)[2], byrow = T)/dim(w2)[1]
                             )
 ```
@@ -234,7 +235,7 @@ pec_rslt <- pec(list("MSpline-Loo"=survs_loo2,
                      "Constant-Loo"=survs_loo1,
                      "MSpline"=survs2,
                      "Constant"=survs1
-                     ), formula =Surv(time,d)~arm , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,d)~race , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
@@ -246,7 +247,6 @@ df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model
 
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Reference"]], model="Kaplan-Meier"))
 ggplot(data=df_pec) +
-  geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_step(aes(x=time, y=bs, color=model))+
   geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
@@ -273,7 +273,7 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 ```{r, echo=FALSE}
 pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
                      "Constant"=survs1
-                     ), formula =Surv(time,d)~arm , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,status)~x , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
@@ -300,7 +300,7 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 ```{r, echo=FALSE}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
                      "MSpline"=survs2
-                     ), formula =Surv(time,d)~arm , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,status)~x , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)

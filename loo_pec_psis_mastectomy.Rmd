@@ -1,19 +1,26 @@
 ---
-title: "Leave-One-Out Brier Score for survival models"
+title: "Leave-One-Out Brier Score for Bayesian Survival Models"
 subtitle: "Using Pareto smoothed importance sampling"
 author: "Eren M. El&ccedil;i"
 date: "2018-11-21"
 output:
-  tufte::tufte_html: default
-  tufte::tufte_handout: default
-
+  html_document:
+    theme: simplex
+    highlight: tango
+    toc: true
+    toc_depth: 2
+    code_folding: hide
+    df_print: paged
 ---
 
-In this document we show how to implement a leave-one-out version of the so-called "inverse of probability of censoring weighted estimator" (below referred to as Brier Score) for time dependent prediction accuracy of Bayesian survival models.
+In this short case study I show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and develop an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. We provide an efficient implementation in R, based on exposed (through `sourceCpp`) Stan code.
 
-We use Pareto-Smoothed importance sampling here in order to avoid re-running the Bayesian analysis for any leave-one-out instance.
+References:
 
-We provide an efficient implementation written in Stan and exposed to R.
+> Vehtari, Aki, Andrew Gelman, and Jonah Gabry. "Practical Bayesian model evaluation using leave-one-out cross-validation and WAIC." Statistics and Computing 27.5 (2017): 1413-1432.
+APA	
+
+> Gerds, Thomas A., and Martin Schumacher. "Consistent estimation of the expected Brier score in general survival models with right‐censored event times." Biometrical Journal 48.6 (2006): 1029-1040.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -28,6 +35,7 @@ library(splines2)
 library(pec)
 library(HSAUR)
 library(cowplot)
+library(MCMCpack)
 cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 expose_stan_functions("~/Desktop/Stan/Loo_Pec/utils_surv.stan")
 sm <- stan_model("~/Desktop/Stan/Loo_Pec/exponential_survival_simple_ppc_cond_loo.stan")
@@ -37,13 +45,17 @@ df <- as.tibble(mastectomy)
 df <- df %>% mutate(metastized=as.double(metastized=="yes"))
 ```
 
+# The dataset 
+
 ```{r inspect, echo=FALSE}
-knitr::kable(
-  df, caption = 'A mastectomy dataset'
-)
+df
 ```
 
-```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+For more details on the dataset and how to model aspects of it using Bayesian survival models (in Stan), see my previous case study [here](https://ermeel86.github.io/case_studies/surv_stan_example.html).
+
+# The models
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
 N <- nrow(df)
 X <- as.matrix(as.integer(pull(df, metastized))-1)
 is_censored <- pull(df,event)==0
@@ -53,12 +65,108 @@ N_censored <- sum(msk_censored)
 
 time_range <- range(times)
 time_min <- time_range[1]
-time_max <- time_range[2] #time_range[2]
+time_max <- time_range[2]
+```
 
+We implement two proportional hazard models with different baseline hazards and show below prior predictive draws of the corresponding baseline hazard.
+
+## Constant baseline hazard (aka constant)
+
+As the name suggests, this model uses a constant baseline hazard (and therefore has an exponential law for the event time).
+
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
+nprior_samples <- 8
+icpt_samples <- exp(rnorm(nprior_samples, -5, 2))
+df_plot <- map_dfr(1:nprior_samples, ~tibble(time=seq(0, time_max, length.out = 1000), surv=exp(-time*icpt_samples[.]), sample=.))
+p1<- ggplot(data=tibble(bhazards=icpt_samples, sample=as.factor(1:nprior_samples)))+
+  scale_y_log10(name="Hazard", limits=exp(c(-10, -1))) +
+  scale_x_continuous(name="Time", limits=c(0,time_max))+
+  geom_hline(aes(yintercept=bhazards, color=sample))+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Baseline Hazard")
+p2 <- ggplot(data=df_plot)+
+  geom_line(aes(x=time, y=surv, color=as.factor(sample)))+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  xlab("Time")+
+  ylab("Probability")+
+  ggtitle("Baseline Survival")
+
+cowplot::plot_grid(p1,p2,ncol=2)
+```
+
+## Time dependent baseline hazard (aka M-Spline)
+
+This model allows for a time-dependent baseline hazard using M-splines
+
+> Ramsay, James O. “Monotone regression splines in action.” Statistical science 3.4 (1988): 425-441.
+
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
 knots <- quantile(times[!msk_censored], probs = c(.05, .35, .65, .95))
 
 nknots <- length(knots)
 mspline_degree<- 3
+
+times_plot <- 0:time_max
+isp_plot <- iSpline(times_plot, knots=knots, degree=mspline_degree,
+                                intercept=FALSE,Boundary.knots = c(0, max(time_max)))
+msp_plot <- deriv(isp_plot)
+nsimplex_samps <- 8
+nbasis <- dim(isp_plot)[2]
+
+simplex_samples <- t(MCMCpack::rdirichlet(nsimplex_samps, rep(1,nbasis)))
+icpt_samples <- exp(rnorm(nsimplex_samps, 0, 2))
+
+isp_plot_2 <- isp_plot %*% simplex_samples
+msp_plot_2 <- msp_plot %*% simplex_samples
+isp_plot <- as.tibble(as.data.frame(as.matrix(isp_plot)))
+msp_plot <- as.tibble(as.data.frame(as.matrix(msp_plot)))
+names(icpt_samples) <- colnames(isp_plot)
+isp_plot <- map_dfr(colnames(isp_plot), ~tibble(y=pull(isp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
+msp_plot <- map_dfr(colnames(msp_plot), ~tibble(y=pull(msp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
+```
+
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
+p1 <- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=msp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
+  geom_vline(xintercept = knots, alpha=.5, color='gray')+
+  geom_line(mapping = aes(x=time, y=y, color=sample))+
+  ggtitle("Baseline hazard")+
+  xlab("Time")+
+  ylab("Hazard")+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+
+
+# p2<- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=isp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
+#   geom_vline(xintercept = knots, alpha=.5, color='gray')+
+#   geom_line(mapping = aes(x=time, y=y, color=sample))+
+#   ggtitle("Cumulative Baseline hazard")+
+#   xlab("Time")+
+#   ylab("Cumulative Hazard")+
+#   guides( color=FALSE)+
+#   scale_fill_manual(values=cbbPalette)+
+#   scale_colour_manual(values=cbbPalette)
+
+p3<- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=exp(-isp_plot_2[,.]), time=times_plot, sample=.)), sample=as.factor(sample)))+
+  geom_vline(xintercept = knots, alpha=.5, color='gray')+
+  geom_line(mapping = aes(x=time, y=y, color=sample))+
+  ggtitle("Baseline Survival")+
+  xlab("Time")+
+  ylab("Probability")+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+
+cowplot::plot_grid(p1,p3,ncol=2)
+```
+
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
 i_spline_basis_evals <- iSpline(times, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
 m_spline_basis_evals <- deriv(i_spline_basis_evals)
@@ -90,29 +198,29 @@ post <- as.array(fit)
 post2 <- as.array(fit2)
 ```
 
+# Posterior
 
-## Loo
+## Constant
 
-```{r loo, echo=TRUE}
-log_lik_1 <- extract_log_lik(fit, merge_chains = FALSE)
-r_eff <- relative_eff(exp(log_lik_1)) 
-loo_1 <- loo(log_lik_1, r_eff = r_eff, cores = 2)
-print(loo_1)
-
-log_lik_2 <- extract_log_lik(fit2, merge_chains = FALSE)
-r_eff <- relative_eff(exp(log_lik_2)) 
-loo_2 <- loo(log_lik_2, r_eff = r_eff, cores = 2)
-print(loo_2)
-comp <- compare(loo_1, loo_2)
-
-print(comp)
+```{r, warning=FALSE, message=FALSE, error=FALSE}
+broom::tidy(fit, conf.int=T) %>% filter(! term %in%  c(sprintf("times_uncensored_sampled[%d]", 1:stan_data$N_uncensored),
+                                                       sprintf("log_lik[%d]", 1:N)
+                                                       ))
 ```
+
+
+## M-spline
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
+broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N))
+```
+
 
 ## Survival curves
 
-## M-Splines
+### M-Spline
 
-```{r surv, echo=FALSE}
+```{r surv_mspline,fig.align='center'}
 intercept = summary(fit2)$summary["intercept", "mean"]
 betas = summary(fit2)$summary["betas[1]", "mean"]
 gammas = summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis),"mean"]
@@ -130,21 +238,21 @@ surv_df <- as.tibble(t(survs)) %>%
 
 surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
                      dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
-knitr::kable(
-  head(surv_df,10)
-)
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0,1))
+surv_df
 ```
 
-## Constant
+### Constant
 
-```{r surv_constant, echo=FALSE}
+```{r surv_constant,fig.align='center'}
 intercept = summary(fit)$summary["intercept", "mean"]
 betas = summary(fit)$summary["betas[1]", "mean"]
 X_surv = as.matrix(c(0,1))
@@ -160,37 +268,58 @@ surv_df <- as.tibble(t(survs)) %>%
 
 surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
                      dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
-knitr::kable(
-  head(surv_df,10)
-)
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0,1))
+
+surv_df
 ```
 
-## Brier Score (LOO-PSIS)
+# Brier Score (LOO-PSIS)
+
+Denote by $\mathbf{T}_{-i}$ the $N-1$ dimensional vector of observed times (censored and uncensored) for all individuals, except for individual $i$. Write 
+$S_i(t\vert \mathbf{T}_{-i})$ for the expected survival probability of patient $i$ at time $t$, where the expectation is with respect to the posterior over all latent model parameters $\theta$, given observations $\mathbf{T}_i$. 
+
+Now, suppose $\{\theta_s\}_{s=1\dots S}$ is a (correlated) sequence of latent model parameters drawn from the posterior, given *all* observed times (including the one from individual $i$). We then can approximate $S_i(t\vert \mathbf{T}_{-i})$  as follows
 
 $$
 S_i(t\vert \mathbf{T}_{-i}) \approx \frac{\sum_{s=1}^S r_{s,i} S_i(t\vert \theta_s)}{\sum_{s=1}^S r_{s,i}}
 $$
 
-with
+where $S_i(t\vert \theta_s)$ is the probability that individual $i$ survives beyond time $t$, given latent parameters $\theta_s$ and
 
 $$
 r_{s,i} \equiv \frac{1}{p(T_i\vert \theta_s)}
 $$
+Now, define
 
 $$
 \eta_{i,t} \equiv \left\{ 1_{\{T_i > t\}} - S_i(t\vert \mathbf{T}_{-i})\right\}^2
 $$
 
-Based on the residuals $\eta_{i,t}$ using the `pec` R Package, we calculate the so-called inverse of probability of censoring weighted estimator (below referred to as Brier Score)
+Based on the residuals $\eta_{i}(t)$ we define, following Gerds et  al, the inverse probability of censoring weighted estimator $\Omega(t)$, defined as 
 
-```{r, echo=FALSE}
+$$
+\Omega(t)\equiv \frac{1}{N} \sum_{i=1}^N  w_i(t)\eta_{i}(t)^2 
+$$
+
+with 
+
+$$
+w_i(t) \equiv \frac{\mathbf{1}_{\{T_i \leq t\}} \delta_i}{G_i(T_i)} + \frac{\mathbf{1}_{\{T_i > t\}}}{G_i(t)}
+$$
+
+Here $\delta_i$ is the event indicator, i.e. $\delta_i = 1$ iff individual experienced the event and $0$ otherwise. Moreover $G_i(t)$ is the probability that the censoring time $C_i$ is exceeds $t$ for patient $i$. Note that for both the event and censoring survival functions we indicate a potential dependence on covariates by adding the index $i$. $G_i(t)$ can be obtained by fitting, for example, a Cox model to the data and reversing the censoring indicators $\delta_i$. By introducing a weighting based on $G_i$ we guarantee that the estimator's bias $\Omega(t)$ does not depent on the survival model (otherwise model comparison would be hard), see Gerds et al. It can be shown, see Gerds et al., that under weaks conditions, $\Omega(t)$ is a uniformly consistent estimator for the expected mean squared error in time (aka Brier score).
+
+For both models, the constant and time dependent baseline hazard, we provide R functions `surv_const_loo` and `surv_mspline_loo` which can be used to calculate $S_i(t\vert \mathbf{T}_{-i})$ for all $i$ and required times $t$. This matrix $\{S_i(t\vert \mathbf{T}_{-i})\}_{i,t}$ can then be passed to the function `pec()` part of the  `pec` R Package, which calculates $\Omega(t)$ and provides ways to choose $G_i$, see the code below.
+
+```{r, fig.align='center'}
 times_pec <- seq(0, time_max, length.out = 100)
 log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
 r_eff <- relative_eff(exp(log_ratios))
@@ -210,7 +339,7 @@ survs1 <- surv_const_loo(times_pec,
                             )
 ```
 
-```{r, echo=FALSE}
+```{r, fig.align='center'}
 i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
 log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
@@ -234,7 +363,7 @@ survs2 <- surv_mspline_loo(i_spline_basis_evals,
                             )
 ```
 
-```{r, echo=FALSE}
+```{r, fig.align='center'}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
                      "Constant-Loo"=survs_loo1,
                      "MSpline"=survs2,
@@ -254,7 +383,8 @@ ggplot(data=df_pec) +
   geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_step(aes(x=time, y=bs, color=model))+
-  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   ylab("Brier Score")+
   xlab("Time")+  
   scale_fill_manual(values=cbbPalette)+
@@ -266,16 +396,14 @@ trsf_bs <- function(m) {
     dplyr::rename(!!paste("bs",m,sep="_") := bs)
 }
 
-knitr::kable(
 purrr::map(unique(df_pec$model),trsf_bs) %>% 
   purrr::reduce(left_join, by = "time")
-)
 
 ```
 
-## Constant only 
+### Constant only 
 
-```{r, echo=FALSE}
+```{r, fig.align='center'}
 pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
                      "Constant"=survs1
                      ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
@@ -289,20 +417,19 @@ df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model
 ggplot(data=df_pec) +
   geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
   geom_step(aes(x=time, y=bs, color=model))+
-  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   ylab("Brier Score")+
   xlab("Time")+  
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)
-knitr::kable(
 purrr::map(unique(df_pec$model),trsf_bs) %>% 
   purrr::reduce(left_join, by = "time")
-)
 ```
 
-## MSpline only 
+### MSpline only 
 
-```{r, echo=FALSE}
+```{r, fig.align='center'}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
                      "MSpline"=survs2
                      ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
@@ -317,14 +444,15 @@ ggplot(data=df_pec) +
   geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_step(aes(x=time, y=bs, color=model))+
-  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   ylab("Brier Score")+
   xlab("Time")+  
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)
-knitr::kable(
+
 purrr::map(unique(df_pec$model),trsf_bs) %>% 
   purrr::reduce(left_join, by = "time")
-)
+
 ```
 

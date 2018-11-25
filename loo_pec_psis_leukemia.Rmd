@@ -35,6 +35,13 @@ df <- as.tibble(leukemia) %>%
 df
 ```
 
+
+```{r inspect, echo=FALSE}
+knitr::kable(
+  head(df,5)
+)
+```
+
 ```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
 N <- nrow(df)
 X <- as.matrix(as.integer(pull(df, x))-1)
@@ -122,7 +129,9 @@ surv_df <- as.tibble(t(survs)) %>%
 
 surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(arm="A"), 
                      dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(arm="B"))
-surv_df
+knitr::kable(
+  head(surv_df,10)
+)
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
@@ -150,7 +159,9 @@ surv_df <- as.tibble(t(survs)) %>%
 
 surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(arm="A"), 
                      dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(arm="B"))
-surv_df
+knitr::kable(
+  head(surv_df,10)
+)
 
 ggplot(data=surv_df) + 
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
@@ -190,11 +201,12 @@ survs_loo1 <- surv_const_loo(times_pec,
                             matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
                             t(w)
                             )
-survs1 <- surv_const(times_pec, 
-                     X, 
-                     summary(fit)$summary["intercept", "mean"], 
-                     summary(fit)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]
-)
+survs1 <- surv_const_loo(times_pec,
+                            X,
+                            as.vector(post[,,"intercept"]),
+                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
+                            matrix(rep(1, dim(w)[1]*dim(w)[2]), nrow = dim(w)[2], byrow = T)/dim(w)[1]
+                            )
 ```
 
 ```{r, echo=FALSE}
@@ -209,15 +221,16 @@ survs_loo2 <- surv_mspline_loo(i_spline_basis_evals,
                             matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
                             as.vector(post2[,,"intercept"]),
                             matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
-                            t(w)
+                            t(w2)
                             )
 
-survs2 <- surv_mspline(i_spline_basis_evals,
-                       X,
-                      summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis), "mean"],                
-                      summary(fit2)$summary["intercept", "mean"], 
-                      summary(fit2)$summary[sprintf("betas[%d]", 1:ncol(X)), "mean"]                       
-                       )
+survs2 <- surv_mspline_loo(i_spline_basis_evals,
+                            X,
+                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
+                            as.vector(post2[,,"intercept"]),
+                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
+                            matrix(rep(1, dim(w2)[1]*dim(w2)[2]), nrow = dim(w2)[2], byrow = T)/dim(w2)[1]
+                            )
 ```
 
 ```{r, echo=FALSE}
@@ -251,8 +264,39 @@ trsf_bs <- function(m) {
     dplyr::select(time, bs) %>%
     dplyr::rename(!!paste("bs",m,sep="_") := bs)
 }
+
+knitr::kable(
 purrr::map(unique(df_pec$model),trsf_bs) %>% 
   purrr::reduce(left_join, by = "time")
+)
+
+```
+
+## Constant only 
+
+```{r, echo=FALSE}
+pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
+                     "Constant"=survs1
+                     ), formula =Surv(time,status)~x , data=df, exact = F, times = times_pec,cens.model="marginal",
+                splitMethod="none",
+                B=0,
+                verbose=TRUE)
+
+df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant"))
+
+ggplot(data=df_pec) +
+  geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
+  geom_step(aes(x=time, y=bs, color=model))+
+  geom_rug(data=tibble(times=times), aes(x=times), col="steelblue",alpha=0.5, size=1.25)+
+  ylab("Brier Score")+
+  xlab("Time")+  
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+knitr::kable(
+purrr::map(unique(df_pec$model),trsf_bs) %>% 
+  purrr::reduce(left_join, by = "time")
+)
 ```
 
 ## MSpline only 
@@ -277,7 +321,9 @@ ggplot(data=df_pec) +
   xlab("Time")+  
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)
+knitr::kable(
 purrr::map(unique(df_pec$model),trsf_bs) %>% 
   purrr::reduce(left_join, by = "time")
+)
 ```
 
