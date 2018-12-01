@@ -6,6 +6,26 @@ functions {
         return s ;
     }
 
+    // gammas has nbasis rows and nsamples columns
+    // betas has ncovariates rows and nsamples columns!!!
+    matrix surv_mspline_t(real[] i_spline_basis_evals, matrix X, matrix gammas, real[] intercepts, matrix betas) {
+        int npatients = rows(X);
+        return exp(rep_matrix(-to_row_vector(i_spline_basis_evals) * gammas, npatients).*exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients)));
+    }
+
+    // X has npatient rows and ncovariates columns
+    // betas has ncovariates rows and nsamples columns!!!
+    matrix surv_const_t(real time, matrix X, real[] intercepts, matrix betas) {
+        int npatients = rows(X);
+        return exp(-time*exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients)));
+    }
+    // survs has npatients rows and nsamples columns
+    // psis_ws has npatients rows and nsamples columns
+    vector surv_loo(matrix survs, matrix psis_ws) {
+        return row_sums(survs .* psis_ws);
+    }
+    /***************************************************************************************/
+    /***************************************************************************************/
     matrix surv_mspline(matrix i_spline_basis_evals, matrix X, real[] gammas, real intercept,real[] betas) {
         vector[rows(i_spline_basis_evals)] basehaz;
         vector[rows(X)] hrs;
@@ -58,6 +78,9 @@ functions {
         }
         return survs_loo; 
     }
+
+
+
 
     // i_spline_basis_evals has ntimes rows and nbasis columns
     // gammas has nsamps rows and nbasis columns

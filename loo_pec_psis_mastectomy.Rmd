@@ -130,7 +130,7 @@ msp_plot <- map_dfr(colnames(msp_plot), ~tibble(y=pull(msp_plot, .)*icpt_samples
 ```
 
 
-```{r, warning=FALSE, message=FALSE, error=FALSE}
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
 p1 <- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=msp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
   geom_vline(xintercept = knots, alpha=.5, color='gray')+
   geom_line(mapping = aes(x=time, y=y, color=sample))+
@@ -220,7 +220,7 @@ broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N
 
 ### M-Spline
 
-```{r surv_mspline,fig.align='center'}
+```{r surv_mspline_old,fig.align='center', echo=FALSE, eval=FALSE}
 intercept = summary(fit2)$summary["intercept", "mean"]
 betas = summary(fit2)$summary["betas[1]", "mean"]
 gammas = summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis),"mean"]
@@ -250,9 +250,43 @@ ggplot(data=surv_df) +
 surv_df
 ```
 
+
+```{r surv_mspline,fig.align='center'}
+intercepts <- as.vector(post2[,,"intercept"])
+betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
+gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
+
+X_surv = as.matrix(c(0,1))
+times_plot <- seq(0, time_max, length.out = 100)
+i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+
+survs <- purrr::map(1:length(times_plot), ~rowMeans(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas)))
+surv_df <- dplyr::bind_rows(
+  tibble(
+  t=times_plot,
+  metastized=F,
+  surv=map_dbl(survs, ~.[[1]])
+  ),
+    tibble(
+  t=times_plot,
+  metastized=T,
+  surv=map_dbl(survs, ~.[[2]])
+  )) 
+  ggplot(data=surv_df) + 
+  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
+    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0,1))
+  surv_df
+```
+
 ### Constant
 
-```{r surv_constant,fig.align='center'}
+```{r surv_constant,fig.align='center', eval=FALSE, echo=FALSE}
 intercept = summary(fit)$summary["intercept", "mean"]
 betas = summary(fit)$summary["betas[1]", "mean"]
 X_surv = as.matrix(c(0,1))
@@ -278,6 +312,35 @@ ggplot(data=surv_df) +
   scale_colour_manual(values=cbbPalette)+
   ylim(c(0,1))
 
+surv_df
+```
+
+```{r, fig.align='center'}
+intercepts <- as.vector(post[,,"intercept"])
+betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
+X_surv = as.matrix(c(0,1))
+times_plot <- seq(0, time_max, length.out = 100)
+survs <- purrr::map(times_plot, ~rowMeans(surv_const_t(., X_surv, intercepts, betas)))
+ surv_df <- dplyr::bind_rows(
+  tibble(
+  t=times_plot,
+  metastized=F,
+  surv=map_dbl(survs, ~.[[1]])
+  ),
+    tibble(
+  t=times_plot,
+  metastized=T,
+  surv=map_dbl(survs, ~.[[2]])
+  ) 
+  )
+  ggplot(data=surv_df) + 
+  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
+    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0,1))
 surv_df
 ```
 
@@ -315,11 +378,11 @@ $$
 w_i(t) \equiv \frac{\mathbf{1}_{\{T_i \leq t\}} \delta_i}{G_i(T_i)} + \frac{\mathbf{1}_{\{T_i > t\}}}{G_i(t)}
 $$
 
-Here $\delta_i$ is the event indicator, i.e. $\delta_i = 1$ iff individual experienced the event and $0$ otherwise. Moreover $G_i(t)$ is the probability that the censoring time $C_i$ is exceeds $t$ for patient $i$. Note that for both the event and censoring survival functions we indicate a potential dependence on covariates by adding the index $i$. $G_i(t)$ can be obtained by fitting, for example, a Cox model to the data and reversing the censoring indicators $\delta_i$. By introducing a weighting based on $G_i$ we guarantee that the estimator's bias $\Omega(t)$ does not depent on the survival model (otherwise model comparison would be hard), see Gerds et al. It can be shown, see Gerds et al., that under weaks conditions, $\Omega(t)$ is a uniformly consistent estimator for the expected mean squared error in time (aka Brier score).
+Here $\delta_i$ is the event indicator, i.e. $\delta_i = 1$ iff individual experienced the event and $0$ otherwise. Moreover $G_i(t)$ is the probability that the censoring time $C_i$ is exceeds $t$ for patient $i$. Note that for both the event and censoring survival functions we indicate a potential dependence on covariates by adding the index $i$. $G_i(t)$ can be obtained by fitting, for example, a Cox model to the data with reversed censoring indicators. By introducing a weighting based on $G_i$ we guarantee that the estimator's bias $\Omega(t)$ does not depent on the survival model (otherwise model comparison would be hard), see Gerds et al. It can be shown, see Gerds et al., that under weaks conditions, $\Omega(t)$ is a uniformly consistent estimator for the expected mean squared error in time (aka Brier score).
 
 For both models, the constant and time dependent baseline hazard, we provide R functions `surv_const_loo` and `surv_mspline_loo` which can be used to calculate $S_i(t\vert \mathbf{T}_{-i})$ for all $i$ and required times $t$. This matrix $\{S_i(t\vert \mathbf{T}_{-i})\}_{i,t}$ can then be passed to the function `pec()` part of the  `pec` R Package, which calculates $\Omega(t)$ and provides ways to choose $G_i$, see the code below.
 
-```{r, fig.align='center'}
+```{r, fig.align='center', eval=FALSE, echo=FALSE}
 times_pec <- seq(0, time_max, length.out = 100)
 log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
 r_eff <- relative_eff(exp(log_ratios))
@@ -339,7 +402,23 @@ survs1 <- surv_const_loo(times_pec,
                             )
 ```
 
+
 ```{r, fig.align='center'}
+intercepts <- as.vector(post[,,"intercept"])
+betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
+X_surv = as.matrix(c(0,1))
+times_pec <- seq(0, time_max, length.out = 100)
+survs1 <- purrr::map(times_pec, ~rowMeans(surv_const_t(., X, intercepts, betas)))
+survs1 <- do.call(cbind, survs1)
+
+log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
+r_eff <- relative_eff(exp(log_ratios))
+psis_result <- psis(log_ratios, r_eff = r_eff)
+w <- matrix(weights(psis_result, log=FALSE), nrow=dim(X)[1], byrow = T) # TODO: check if this is correct reshaping!
+survs_loo1 <- do.call(cbind, purrr::map(times_pec,~surv_loo(surv_const_t(., X, intercepts, betas), w)))
+```
+
+```{r, fig.align='center', echo=FALSE, eval=FALSE}
 i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
 log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
@@ -362,6 +441,28 @@ survs2 <- surv_mspline_loo(i_spline_basis_evals,
                             matrix(rep(1, dim(w2)[1]*dim(w2)[2]), nrow = dim(w2)[2], byrow = T)/dim(w2)[1]
                             )
 ```
+
+
+```{r, fig.align='center'}
+intercepts <- as.vector(post2[,,"intercept"])
+betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
+gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
+times_pec <- seq(0, time_max, length.out = 100)
+i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+
+survs2 <- purrr::map(1:length(times_pec), ~rowMeans(surv_mspline_t(i_spline_basis_evals[.,], X, gammas,intercepts, betas)))
+survs2 <- do.call(cbind, survs2)
+
+log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
+r_eff2 <- relative_eff(exp(log_ratios2))
+psis_result2 <- psis(log_ratios2, r_eff = r_eff2)
+w2<- matrix(weights(psis_result2, log=FALSE), nrow=dim(X)[1], byrow = T) # TODO: check if this is correct reshaping!
+
+
+survs_loo2 <- do.call(cbind, purrr::map(1:length(times_pec),~surv_loo(surv_mspline_t(i_spline_basis_evals[.,], X, gammas, intercepts, betas), w2)))
+```
+
 
 ```{r, fig.align='center'}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
