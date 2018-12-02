@@ -221,7 +221,7 @@ broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N
 
 ### M-Spline
 
-```{r surv_mspline,fig.align='center'}
+```{r hazard_mspline,fig.align='center'}
 intercepts <- as.vector(post2[,,"intercept"])
 betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
 gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
@@ -282,7 +282,8 @@ hazard_df <- dplyr::bind_rows(
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)+
-  ggtitle("Male")
+  ggtitle("Male")+
+  ylim(c(0,0.025))
   
   p2<- ggplot(data=filter(hazard_df, sex=="female")) + 
   geom_ribbon(mapping=aes(x=t,ymin=hazard_low, ymax=hazard_up, fill=race), alpha=.25)+
@@ -292,7 +293,85 @@ hazard_df <- dplyr::bind_rows(
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)+
-  ggtitle("Female")
+  ggtitle("Female")+
+  ylim(c(0,0.025))
+  
+  cowplot::plot_grid(p1,p2, ncol=1)
+  hazard_df
+```
+
+
+### Constant
+
+```{r hazard_constant,fig.align='center'}
+intercepts <- as.vector(post[,,"intercept"])
+betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
+
+X_surv = matrix(c(0,0, 0,1, 1,0, 1,1),nrow=4, byrow = T)
+times_plot <- seq(0, time_max, length.out = 100)
+
+hazards <- purrr::map(times_plot, ~rowMeans(hazard_const_t(., X_surv, intercepts, betas)))
+quantile_func <- function(x, probs) {
+  x <- as.data.frame(t(x))
+  map_dbl(x, ~quantile(., probs=probs))
+}
+hazards_low <- purrr::map(times_plot, ~quantile_func(hazard_const_t(., X_surv, intercepts, betas),probs=c(0.025)))
+hazards_up <- purrr::map(times_plot, ~quantile_func(hazard_const_t(., X_surv, intercepts, betas),probs=c(0.975)))
+hazard_df <- dplyr::bind_rows(
+  tibble(
+  t=times_plot,
+  race="white",
+  sex="male",
+  hazard=map_dbl(hazards, ~.[[1]]),
+  hazard_low=map_dbl(hazards_low,~.[[1]]),
+  hazard_up=map_dbl(hazards_up,~.[[1]])
+  ),
+    tibble(
+  t=times_plot,
+  race="non-white",
+  sex="male",
+  hazard=map_dbl(hazards, ~.[[2]]),
+  hazard_low=map_dbl(hazards_low,~.[[2]]),
+  hazard_up=map_dbl(hazards_up,~.[[2]])
+  ),
+    tibble(
+  t=times_plot,
+  race="white",
+  sex="female",
+  hazard=map_dbl(hazards, ~.[[3]]),
+  hazard_low=map_dbl(hazards_low,~.[[3]]),
+  hazard_up=map_dbl(hazards_up,~.[[3]])
+  ),
+    tibble(
+  t=times_plot,
+  race="non-white",
+  sex="female",
+  hazard=map_dbl(hazards, ~.[[4]]),
+  hazard_low=map_dbl(hazards_low,~.[[4]]),
+  hazard_up=map_dbl(hazards_up,~.[[4]])
+  )
+  ) 
+  
+
+  p1<- ggplot(data=filter(hazard_df, sex=="male")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=hazard_low, ymax=hazard_up, fill=race), alpha=.25)+
+  geom_line(mapping=aes(x=t, y=hazard, color=race))+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Male")+
+  ylim(c(0,0.005))
+  
+  p2<- ggplot(data=filter(hazard_df, sex=="female")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=hazard_low, ymax=hazard_up, fill=race), alpha=.25)+
+  geom_line(mapping=aes(x=t, y=hazard, color=race))+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Female")+
+  ylim(c(0,0.005))
   
   cowplot::plot_grid(p1,p2, ncol=1)
   hazard_df

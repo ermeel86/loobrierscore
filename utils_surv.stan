@@ -6,6 +6,8 @@ functions {
         return s ;
     }
 
+    // gammas has nbasis rows and nsamples columns
+    // betas has ncovariates rows and nsamples columns!!!
     matrix hazard_mspline_t(real[] m_spline_basis_evals, matrix X, matrix gammas, real[] intercepts, matrix betas) {
         int npatients = rows(X);
         return rep_matrix(to_row_vector(m_spline_basis_evals) * gammas, npatients).*exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients));
@@ -16,6 +18,13 @@ functions {
     matrix surv_mspline_t(real[] i_spline_basis_evals, matrix X, matrix gammas, real[] intercepts, matrix betas) {
         int npatients = rows(X);
         return exp(rep_matrix(-to_row_vector(i_spline_basis_evals) * gammas, npatients).*exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients)));
+    }
+
+    // X has npatient rows and ncovariates columns
+    // betas has ncovariates rows and nsamples columns!!!
+    matrix hazard_const_t(real time, matrix X, real[] intercepts, matrix betas) {
+        int npatients = rows(X);
+        return exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients));
     }
 
     // X has npatient rows and ncovariates columns
