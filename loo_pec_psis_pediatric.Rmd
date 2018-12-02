@@ -1,13 +1,26 @@
 ---
-title: "Leave-One-Out Brier Score for survival models"
+title: "Leave-One-Out Brier Score for Bayesian Survival Models"
 subtitle: "Using Pareto smoothed importance sampling"
 author: "Eren M. El&ccedil;i"
-date: "2018-11-18"
-output: 
+date: "2018-12-02"
+output:
   html_document:
+    theme: simplex
+    highlight: tango
+    toc: true
+    toc_depth: 2
+    code_folding: hide
     df_print: paged
-
 ---
+
+In this short case study I show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and develop an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. We provide an efficient implementation in R, based on exposed (through `sourceCpp`) Stan code.
+
+References:
+
+> Vehtari, Aki, Andrew Gelman, and Jonah Gabry. "Practical Bayesian model evaluation using leave-one-out cross-validation and WAIC." Statistics and Computing 27.5 (2017): 1413-1432.
+APA	
+
+> Gerds, Thomas A., and Martin Schumacher. "Consistent estimation of the expected Brier score in general survival models with right‐censored event times." Biometrical Journal 48.6 (2006): 1029-1040.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -21,24 +34,27 @@ library(bayesplot)
 library(splines2)
 library(pec)
 library(cowplot)
+library(MCMCpack)
 cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 expose_stan_functions("~/Desktop/Stan/Loo_Pec/utils_surv.stan")
 sm <- stan_model("~/Desktop/Stan/Loo_Pec/exponential_survival_simple_ppc_cond_loo.stan")
 sm2 <- stan_model("~/Desktop/Stan/Loo_Pec/survival_parametric_baseline_hazard_simplex_loo.stan")
-df <- read.delim("~/Desktop/Stan/Loo_Pec/pediatric.txt", sep=' ')
+df <- as.tibble(read.delim("~/Desktop/Stan/Loo_Pec/pediatric.txt", sep=' '))
 df <- mutate(df, time = t*12/365)
 ```
 
+# The dataset 
 
 ```{r inspect, echo=FALSE}
-knitr::kable(
-  head(df,5)
-)
+df
 ```
 
-```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+
+# The models
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
 N <- nrow(df)
-X <- as.matrix(as.integer(pull(df, race))-1)
+X <- as.matrix(cbind(as.integer(pull(df, race))-1,as.integer(pull(df, sex))-1))
 is_censored <- pull(df,d)==0
 times <- pull(df,time)
 msk_censored <- is_censored == 1
@@ -46,12 +62,112 @@ N_censored <- sum(msk_censored)
 
 time_range <- range(times)
 time_min <- time_range[1]
-time_max <- time_range[2] #time_range[2]
-ninterior_knots <- 6
-knots <- quantile(times[!msk_censored],head(tail(seq(0,1, length.out = ninterior_knots+2),-1),-1))
+time_max <- time_range[2]
+```
 
+We implement two proportional hazard models with different baseline hazards and show below prior predictive draws of the corresponding baseline hazard.
+
+## Constant baseline hazard (aka constant)
+
+As the name suggests, this model uses a constant baseline hazard (and therefore has an exponential law for the event time).
+
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
+nprior_samples <- 8
+icpt_samples <- exp(rnorm(nprior_samples, -5, 2))
+# TODO: Replace with direct calls to surv_const_t
+df_plot <- map_dfr(1:nprior_samples, ~tibble(time=seq(0, time_max, length.out = 1000), surv=exp(-time*icpt_samples[.]), sample=.))
+p1<- ggplot(data=tibble(bhazards=icpt_samples, sample=as.factor(1:nprior_samples)))+
+  scale_y_log10(name="Hazard", limits=exp(c(-10, -1))) +
+  scale_x_continuous(name="Time", limits=c(0,time_max))+
+  geom_hline(aes(yintercept=bhazards, color=sample))+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Baseline Hazard")
+p2 <- ggplot(data=df_plot)+
+  geom_line(aes(x=time, y=surv, color=as.factor(sample)))+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  xlab("Time")+
+  ylab("Probability")+
+  ggtitle("Baseline Survival")
+
+cowplot::plot_grid(p1,p2,ncol=2)
+```
+
+## Time dependent baseline hazard (aka M-Spline)
+
+This model allows for a time-dependent baseline hazard using M-splines
+
+> Ramsay, James O. “Monotone regression splines in action.” Statistical science 3.4 (1988): 425-441.
+
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
+ninterior_knots <- 10 # needs to be > 1
+# quantile based
+knots <- quantile(times,head(tail(seq(0,1, length.out = ninterior_knots+2),-1),-1)) # usually we use times[!msk_censored] instead of times!
+dirichlet_alpha<- 1.5
 nknots <- length(knots)
 mspline_degree<- 3
+
+times_plot <- 0:time_max
+isp_plot <- iSpline(times_plot, knots=knots, degree=mspline_degree,
+                                intercept=FALSE,Boundary.knots = c(0, max(time_max)))
+msp_plot <- deriv(isp_plot)
+nsimplex_samps <- 8
+nbasis <- dim(isp_plot)[2]
+
+simplex_samples <- t(MCMCpack::rdirichlet(nsimplex_samps, rep(dirichlet_alpha,nbasis)))
+icpt_samples <- exp(rnorm(nsimplex_samps, 0, 2))
+
+isp_plot_2 <- isp_plot %*% simplex_samples
+msp_plot_2 <- msp_plot %*% simplex_samples
+isp_plot <- as.tibble(as.data.frame(as.matrix(isp_plot_2)))
+msp_plot <- as.tibble(as.data.frame(as.matrix(msp_plot_2)))
+names(icpt_samples) <- colnames(isp_plot)
+isp_plot <- map_dfr(colnames(isp_plot), ~tibble(y=pull(isp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
+msp_plot <- map_dfr(colnames(msp_plot), ~tibble(y=pull(msp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
+```
+
+
+```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
+# TODO: Replace with direct calls to surv_mspline_t
+p1 <- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=msp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
+  geom_vline(xintercept = knots, alpha=.5, color='gray')+
+  geom_line(mapping = aes(x=time, y=y, color=sample))+
+  ggtitle("Baseline hazard")+
+  xlab("Time")+
+  ylab("Hazard")+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+
+
+# p2<- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=isp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
+#   geom_vline(xintercept = knots, alpha=.5, color='gray')+
+#   geom_line(mapping = aes(x=time, y=y, color=sample))+
+#   ggtitle("Cumulative Baseline hazard")+
+#   xlab("Time")+
+#   ylab("Cumulative Hazard")+
+#   guides( color=FALSE)+
+#   scale_fill_manual(values=cbbPalette)+
+#   scale_colour_manual(values=cbbPalette)
+
+p3<- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=exp(-isp_plot_2[,.]), time=times_plot, sample=.)), sample=as.factor(sample)))+
+  geom_vline(xintercept = knots, alpha=.5, color='gray')+
+  geom_line(mapping = aes(x=time, y=y, color=sample))+
+  ggtitle("Baseline Survival")+
+  xlab("Time")+
+  ylab("Probability")+
+  guides( color=FALSE)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+
+cowplot::plot_grid(p1,p3,ncol=2)
+```
+
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
 i_spline_basis_evals <- iSpline(times, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
 m_spline_basis_evals <- deriv(i_spline_basis_evals)
@@ -73,7 +189,8 @@ stan_data <- list(N_uncensored=N-N_censored,
                   m=nbasis,
                   m_spline_basis_evals_uncensored=m_spline_basis_evals_uncensored, 
                   i_spline_basis_evals_uncensored=i_spline_basis_evals_uncensored,
-                  i_spline_basis_evals_censored=i_spline_basis_evals_censored
+                  i_spline_basis_evals_censored=i_spline_basis_evals_censored,
+                  alpha=1.5
 )
 
 fit <- sampling(sm, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
@@ -82,25 +199,6 @@ fit2 <- sampling(sm2, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
 post <- as.array(fit)
 post2 <- as.array(fit2)
 ```
-
-
-## Loo
-
-```{r loo, echo=TRUE}
-log_lik_1 <- extract_log_lik(fit, merge_chains = FALSE)
-r_eff <- relative_eff(exp(log_lik_1)) 
-loo_1 <- loo(log_lik_1, r_eff = r_eff, cores = 2)
-print(loo_1)
-
-log_lik_2 <- extract_log_lik(fit2, merge_chains = FALSE)
-r_eff <- relative_eff(exp(log_lik_2)) 
-loo_2 <- loo(log_lik_2, r_eff = r_eff, cores = 2)
-print(loo_2)
-comp <- compare(loo_1, loo_2)
-
-print(comp)
-```
-
 
 # Posterior
 
@@ -124,68 +222,148 @@ broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N
 
 ### M-Spline
 
-
 ```{r surv_mspline,fig.align='center'}
 intercepts <- as.vector(post2[,,"intercept"])
 betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
 gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
+X_surv = matrix(c(0,0, 0,1, 1,0, 1,1),nrow=4, byrow = T)
 
-X_surv = as.matrix(c(0,1))
 times_plot <- seq(0, time_max, length.out = 100)
 i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
-
+quantile_func <- function(x, probs) {
+  x <- as.data.frame(t(x))
+  map_dbl(x, ~quantile(., probs=probs))
+}
 survs <- purrr::map(1:length(times_plot), ~rowMeans(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas)))
+survs_low <- purrr::map(1:length(times_plot), ~quantile_func(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.025)))
+survs_up <- purrr::map(1:length(times_plot), ~quantile_func(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.975)))
+
 surv_df <- dplyr::bind_rows(
   tibble(
   t=times_plot,
-  race=F,
-  surv=map_dbl(survs, ~.[[1]])
+  race="white",
+  sex="male",
+  surv=map_dbl(survs, ~.[[1]]),
+  surv_low=map_dbl(survs_low,~.[[1]]),
+  surv_up=map_dbl(survs_up,~.[[1]])
   ),
     tibble(
   t=times_plot,
-  race=T,
-  surv=map_dbl(survs, ~.[[2]])
-  )) 
-  ggplot(data=surv_df) + 
+  race="non-white",
+  sex="male",
+  surv=map_dbl(survs, ~.[[2]]),
+  surv_low=map_dbl(survs_low,~.[[2]]),
+  surv_up=map_dbl(survs_up,~.[[2]])
+  ),
+    tibble(
+  t=times_plot,
+  race="white",
+  sex="female",
+  surv=map_dbl(survs, ~.[[3]]),
+  surv_low=map_dbl(survs_low,~.[[3]]),
+  surv_up=map_dbl(survs_up,~.[[3]])
+  ),
+    tibble(
+  t=times_plot,
+  race="non-white",
+  sex="female",
+  surv=map_dbl(survs, ~.[[4]]),
+  surv_low=map_dbl(survs_low,~.[[4]]),
+  surv_up=map_dbl(survs_up,~.[[4]])
+  )
+  ) 
+  
+
+  p1<- ggplot(data=filter(surv_df, sex=="male")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=race), alpha=.25)+
   geom_line(mapping=aes(x=t, y=surv, color=race))+
-    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Male")
+  
+  p2<- ggplot(data=filter(surv_df, sex=="female")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=race), alpha=.25)+
+  geom_line(mapping=aes(x=t, y=surv, color=race))+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ggtitle("Female")
+  
+  cowplot::plot_grid(p1,p2, ncol=1)
   surv_df
 ```
 
 ### Constant
 
-
 ```{r, fig.align='center'}
 intercepts <- as.vector(post[,,"intercept"])
 betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
-X_surv = as.matrix(c(0,1))
 times_plot <- seq(0, time_max, length.out = 100)
 survs <- purrr::map(times_plot, ~rowMeans(surv_const_t(., X_surv, intercepts, betas)))
- surv_df <- dplyr::bind_rows(
+survs_low <- purrr::map(times_plot, ~quantile_func(surv_const_t(., X_surv, intercepts, betas),probs=c(0.025)))
+survs_up <- purrr::map(times_plot, ~quantile_func(surv_const_t(., X_surv, intercepts, betas),probs=c(0.975)))
+surv_df <- dplyr::bind_rows(
   tibble(
   t=times_plot,
-  race=F,
-  surv=map_dbl(survs, ~.[[1]])
+  race="white",
+  sex="male",
+  surv=map_dbl(survs, ~.[[1]]),
+  surv_low=map_dbl(survs_low,~.[[1]]),
+  surv_up=map_dbl(survs_up,~.[[1]])
   ),
     tibble(
   t=times_plot,
-  race=T,
-  surv=map_dbl(survs, ~.[[2]])
-  ) 
+  race="non-white",
+  sex="male",
+  surv=map_dbl(survs, ~.[[2]]),
+  surv_low=map_dbl(survs_low,~.[[2]]),
+  surv_up=map_dbl(survs_up,~.[[2]])
+  ),
+    tibble(
+  t=times_plot,
+  race="non-white",
+  sex="female",
+  surv=map_dbl(survs, ~.[[3]]),
+  surv_low=map_dbl(survs_low,~.[[3]]),
+  surv_up=map_dbl(survs_up,~.[[3]])
+  ),
+    tibble(
+  t=times_plot,
+  race="white",
+  sex="female",
+  surv=map_dbl(survs, ~.[[4]]),
+  surv_low=map_dbl(survs_low,~.[[4]]),
+  surv_up=map_dbl(survs_up,~.[[4]])
   )
-  ggplot(data=surv_df) + 
+  ) 
+  p1<-ggplot(data=filter(surv_df,sex=="male")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=race), alpha=.25)+
   geom_line(mapping=aes(x=t, y=surv, color=race))+
-    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)
-surv_df
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0.5, 1))+
+  ggtitle("Male")
+  
+  p2<-ggplot(data=filter(surv_df,sex=="female")) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=race), alpha=.25)+
+  geom_line(mapping=aes(x=t, y=surv, color=race))+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)+
+  ylim(c(0.5, 1))+
+  ggtitle("Female")
+  cowplot::plot_grid(p1,p2, ncol=1)
+  
+  surv_df
 ```
 
 # Brier Score (LOO-PSIS)
@@ -227,7 +405,6 @@ Here $\delta_i$ is the event indicator, i.e. $\delta_i = 1$ iff individual exper
 For both models, the constant and time dependent baseline hazard, we provide R functions `surv_const_loo` and `surv_mspline_loo` which can be used to calculate $S_i(t\vert \mathbf{T}_{-i})$ for all $i$ and required times $t$. This matrix $\{S_i(t\vert \mathbf{T}_{-i})\}_{i,t}$ can then be passed to the function `pec()` part of the  `pec` R Package, which calculates $\Omega(t)$ and provides ways to choose $G_i$, see the code below.
 
 
-
 ```{r, fig.align='center'}
 intercepts <- as.vector(post[,,"intercept"])
 betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
@@ -242,8 +419,6 @@ psis_result <- psis(log_ratios, r_eff = r_eff)
 w <- matrix(weights(psis_result, log=FALSE), nrow=dim(X)[1], byrow = T) # TODO: check if this is correct reshaping!
 survs_loo1 <- do.call(cbind, purrr::map(times_pec,~surv_loo(surv_const_t(., X, intercepts, betas), w)))
 ```
-
-
 
 ```{r, fig.align='center'}
 intercepts <- as.vector(post2[,,"intercept"])
@@ -271,7 +446,7 @@ pec_rslt <- pec(list("MSpline-Loo"=survs_loo2,
                      "Constant-Loo"=survs_loo1,
                      "MSpline"=survs2,
                      "Constant"=survs1
-                     ), formula =Surv(time,d)~race , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,d)~race+sex , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
@@ -280,7 +455,6 @@ df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo")) %>%
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant")) %>%
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline")) %>%
-
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Reference"]], model="Kaplan-Meier"))
 ggplot(data=df_pec) +
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
@@ -293,7 +467,7 @@ ggplot(data=df_pec) +
   scale_colour_manual(values=cbbPalette)
 
 trsf_bs <- function(m) {
-  dplyr::filter(df_pec, model==m) %>%
+    dplyr::filter(df_pec, model==m) %>%
     dplyr::select(time, bs) %>%
     dplyr::rename(!!paste("bs",m,sep="_") := bs)
 }
@@ -308,13 +482,15 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 ```{r, fig.align='center'}
 pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
                      "Constant"=survs1
-                     ), formula =Surv(time,d)~race , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,d)~race+sex , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
 
 df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
-  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant"))
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant")) %>%
+    bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Reference"]], model="Kaplan-Meier"))
+
 
 ggplot(data=df_pec) +
   geom_step(aes(x=time, y=bs, color=model))+
@@ -333,13 +509,15 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 ```{r, fig.align='center'}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
                      "MSpline"=survs2
-                     ), formula =Surv(time,d)~race , data=df, exact = F, times = times_pec,cens.model="marginal",
+                     ), formula =Surv(time,d)~race+sex , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
 
 df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo") %>%
-  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline"))
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline")) %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Reference"]], model="Kaplan-Meier"))
+
 
 ggplot(data=df_pec) +
   geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
@@ -355,7 +533,4 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
   purrr::reduce(left_join, by = "time")
 
 ```
-
-
-
 

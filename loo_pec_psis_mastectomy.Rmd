@@ -2,7 +2,7 @@
 title: "Leave-One-Out Brier Score for Bayesian Survival Models"
 subtitle: "Using Pareto smoothed importance sampling"
 author: "Eren M. El&ccedil;i"
-date: "2018-11-21"
+date: "2018-12-02"
 output:
   html_document:
     theme: simplex
@@ -77,6 +77,7 @@ As the name suggests, this model uses a constant baseline hazard (and therefore 
 ```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
 nprior_samples <- 8
 icpt_samples <- exp(rnorm(nprior_samples, -5, 2))
+# TODO: Replace with direct calls to surv_const_t
 df_plot <- map_dfr(1:nprior_samples, ~tibble(time=seq(0, time_max, length.out = 1000), surv=exp(-time*icpt_samples[.]), sample=.))
 p1<- ggplot(data=tibble(bhazards=icpt_samples, sample=as.factor(1:nprior_samples)))+
   scale_y_log10(name="Hazard", limits=exp(c(-10, -1))) +
@@ -106,9 +107,9 @@ This model allows for a time-dependent baseline hazard using M-splines
 
 ```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
 knots <- quantile(times[!msk_censored], probs = c(.05, .35, .65, .95))
-
+dirichlet_alpha<- 1
 nknots <- length(knots)
-mspline_degree<- 3
+mspline_degree<-3
 
 times_plot <- 0:time_max
 isp_plot <- iSpline(times_plot, knots=knots, degree=mspline_degree,
@@ -117,13 +118,13 @@ msp_plot <- deriv(isp_plot)
 nsimplex_samps <- 8
 nbasis <- dim(isp_plot)[2]
 
-simplex_samples <- t(MCMCpack::rdirichlet(nsimplex_samps, rep(1,nbasis)))
+simplex_samples <- t(MCMCpack::rdirichlet(nsimplex_samps, rep(dirichlet_alpha,nbasis)))
 icpt_samples <- exp(rnorm(nsimplex_samps, 0, 2))
 
 isp_plot_2 <- isp_plot %*% simplex_samples
 msp_plot_2 <- msp_plot %*% simplex_samples
-isp_plot <- as.tibble(as.data.frame(as.matrix(isp_plot)))
-msp_plot <- as.tibble(as.data.frame(as.matrix(msp_plot)))
+isp_plot <- as.tibble(as.data.frame(as.matrix(isp_plot_2)))
+msp_plot <- as.tibble(as.data.frame(as.matrix(msp_plot_2)))
 names(icpt_samples) <- colnames(isp_plot)
 isp_plot <- map_dfr(colnames(isp_plot), ~tibble(y=pull(isp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
 msp_plot <- map_dfr(colnames(msp_plot), ~tibble(y=pull(msp_plot, .)*icpt_samples[[.]], time=times_plot, basis=.))
@@ -131,6 +132,7 @@ msp_plot <- map_dfr(colnames(msp_plot), ~tibble(y=pull(msp_plot, .)*icpt_samples
 
 
 ```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
+# TODO: Replace with direct calls to surv_mspline_t
 p1 <- ggplot(data=mutate(map_dfr(1:nsimplex_samps, ~tibble(y=msp_plot_2[,.], time=times_plot, sample=.)), sample=as.factor(sample)))+
   geom_vline(xintercept = knots, alpha=.5, color='gray')+
   geom_line(mapping = aes(x=time, y=y, color=sample))+
@@ -188,7 +190,8 @@ stan_data <- list(N_uncensored=N-N_censored,
                   m=nbasis,
                   m_spline_basis_evals_uncensored=m_spline_basis_evals_uncensored, 
                   i_spline_basis_evals_uncensored=i_spline_basis_evals_uncensored,
-                  i_spline_basis_evals_censored=i_spline_basis_evals_censored
+                  i_spline_basis_evals_censored=i_spline_basis_evals_censored,
+                  alpha=1.
 )
 
 fit <- sampling(sm, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
@@ -220,36 +223,6 @@ broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N
 
 ### M-Spline
 
-```{r surv_mspline_old,fig.align='center', echo=FALSE, eval=FALSE}
-intercept = summary(fit2)$summary["intercept", "mean"]
-betas = summary(fit2)$summary["betas[1]", "mean"]
-gammas = summary(fit2)$summary[sprintf("gammas[%d]", 1:nbasis),"mean"]
-X_surv = as.matrix(c(0,1))
-
-times_plot <- seq(0, time_max, length.out = 100)
-i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
-                                intercept=FALSE, Boundary.knots = c(0, time_max))
-
-survs <- surv_mspline(i_spline_basis_evals, X_surv, gammas, intercept, betas)
-
-surv_df <- as.tibble(t(survs)) %>%
-  mutate(t=times_plot) %>%
-  rename(x0=V1, x1=V2)
-
-surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
-                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
-
-ggplot(data=surv_df) + 
-  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
-  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
-  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
-  scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)+
-  ylim(c(0,1))
-surv_df
-```
-
 
 ```{r surv_mspline,fig.align='center'}
 intercepts <- as.vector(post2[,,"intercept"])
@@ -262,20 +235,32 @@ i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
                                 intercept=FALSE, Boundary.knots = c(0, time_max))
 
 survs <- purrr::map(1:length(times_plot), ~rowMeans(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas)))
+quantile_func <- function(x, probs) {
+  x <- as.data.frame(t(x))
+  map_dbl(x, ~quantile(., probs=probs))
+}
+survs_low <- purrr::map(1:length(times_plot), ~quantile_func(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.025)))
+survs_up <- purrr::map(1:length(times_plot), ~quantile_func(surv_mspline_t(i_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.975)))
 surv_df <- dplyr::bind_rows(
   tibble(
   t=times_plot,
   metastized=F,
-  surv=map_dbl(survs, ~.[[1]])
+  surv=map_dbl(survs, ~.[[1]]),
+  surv_low=map_dbl(survs_low,~.[[1]]),
+  surv_up=map_dbl(survs_up,~.[[1]])
+
   ),
     tibble(
   t=times_plot,
   metastized=T,
-  surv=map_dbl(survs, ~.[[2]])
+  surv=map_dbl(survs, ~.[[2]]),
+  surv_low=map_dbl(survs_low,~.[[2]]),
+  surv_up=map_dbl(survs_up,~.[[2]])
   )) 
   ggplot(data=surv_df) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=metastized), alpha=.25)+
   geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
@@ -286,62 +271,39 @@ surv_df <- dplyr::bind_rows(
 
 ### Constant
 
-```{r surv_constant,fig.align='center', eval=FALSE, echo=FALSE}
-intercept = summary(fit)$summary["intercept", "mean"]
-betas = summary(fit)$summary["betas[1]", "mean"]
-X_surv = as.matrix(c(0,1))
-
-times_plot <- seq(0, time_max, length.out = 100)
-
-
-survs <- surv_const(times_plot, X_surv, intercept, betas)
-
-surv_df <- as.tibble(t(survs)) %>%
-  mutate(t=times_plot) %>%
-  rename(x0=V1, x1=V2)
-
-surv_df <- bind_rows(dplyr::select(surv_df, t, x0) %>% rename(surv=x0) %>% mutate(metastized=FALSE), 
-                     dplyr::select(surv_df, t, x1)  %>% rename(surv=x1) %>% mutate(metastized=TRUE))
-
-ggplot(data=surv_df) + 
-  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
-  geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
-  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
-  scale_fill_manual(values=cbbPalette)+
-  scale_colour_manual(values=cbbPalette)+
-  ylim(c(0,1))
-
-surv_df
-```
-
 ```{r, fig.align='center'}
 intercepts <- as.vector(post[,,"intercept"])
 betas <- t(matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)))
 X_surv = as.matrix(c(0,1))
 times_plot <- seq(0, time_max, length.out = 100)
 survs <- purrr::map(times_plot, ~rowMeans(surv_const_t(., X_surv, intercepts, betas)))
- surv_df <- dplyr::bind_rows(
+survs_low <- purrr::map(times_plot, ~quantile_func(surv_const_t(., X_surv, intercepts, betas),probs=c(0.025)))
+survs_up <- purrr::map(times_plot, ~quantile_func(surv_const_t(., X_surv, intercepts, betas),probs=c(0.975)))
+surv_df <- dplyr::bind_rows(
   tibble(
   t=times_plot,
   metastized=F,
-  surv=map_dbl(survs, ~.[[1]])
+  surv=map_dbl(survs, ~.[[1]]),
+  surv_low=map_dbl(survs_low,~.[[1]]),
+  surv_up=map_dbl(survs_up,~.[[1]])
+
   ),
     tibble(
   t=times_plot,
   metastized=T,
-  surv=map_dbl(survs, ~.[[2]])
-  ) 
-  )
+  surv=map_dbl(survs, ~.[[2]]),
+  surv_low=map_dbl(survs_low,~.[[2]]),
+  surv_up=map_dbl(survs_up,~.[[2]])
+  )) 
   ggplot(data=surv_df) + 
+  geom_ribbon(mapping=aes(x=t,ymin=surv_low, ymax=surv_up, fill=metastized), alpha=.25)+
   geom_line(mapping=aes(x=t, y=surv, color=metastized))+
-    geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
   geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
   geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
   scale_fill_manual(values=cbbPalette)+
   scale_colour_manual(values=cbbPalette)+
   ylim(c(0,1))
-surv_df
+  surv_df
 ```
 
 # Brier Score (LOO-PSIS)
