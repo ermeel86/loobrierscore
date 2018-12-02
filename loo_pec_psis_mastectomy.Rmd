@@ -13,7 +13,7 @@ output:
     df_print: paged
 ---
 
-In this short case study I show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and develop an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. We provide an efficient implementation in R, based on exposed (through `sourceCpp`) Stan code.
+In this short case study I show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and develop an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. Part of the functionality is provided through exposed Stan code.
 
 References:
 
@@ -216,6 +216,55 @@ broom::tidy(fit, conf.int=T) %>% filter(! term %in%  c(sprintf("times_uncensored
 
 ```{r, warning=FALSE, message=FALSE, error=FALSE}
 broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N))
+```
+
+
+## Hazards
+
+### M-Spline
+
+```{r surv_mspline,fig.align='center'}
+intercepts <- as.vector(post2[,,"intercept"])
+betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
+gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
+
+X_surv = as.matrix(c(0,1))
+times_plot <- seq(0, time_max, length.out = 100)
+i_spline_basis_evals <- iSpline(times_plot, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+m_spline_basis_evals <- deriv(i_spline_basis_evals)
+hazards <- purrr::map(1:length(times_plot), ~rowMeans(hazard_mspline_t(m_spline_basis_evals[.,], X_surv, gammas, intercepts, betas)))
+quantile_func <- function(x, probs) {
+  x <- as.data.frame(t(x))
+  map_dbl(x, ~quantile(., probs=probs))
+}
+hazards_low <- purrr::map(1:length(times_plot), ~quantile_func(hazard_mspline_t(m_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.025)))
+hazards_up <- purrr::map(1:length(times_plot), ~quantile_func(hazard_mspline_t(m_spline_basis_evals[.,], X_surv, gammas, intercepts, betas),probs=c(0.975)))
+hazards_df <- dplyr::bind_rows(
+  tibble(
+  t=times_plot,
+  metastized=F,
+  hazard=map_dbl(hazards, ~.[[1]]),
+  hazard_low=map_dbl(hazards_low,~.[[1]]),
+  hazard_up=map_dbl(hazards_up,~.[[1]])
+
+  ),
+    tibble(
+  t=times_plot,
+  metastized=T,
+  hazard=map_dbl(hazards, ~.[[2]]),
+  hazard_low=map_dbl(hazards_low,~.[[2]]),
+  hazard_up=map_dbl(hazards_up,~.[[2]])
+  )) 
+  ggplot(data=hazards_df) + 
+  geom_ribbon(mapping=aes(x=t,ymin=hazard_low, ymax=hazard_up, fill=metastized), alpha=.25)+
+  geom_line(mapping=aes(x=t, y=hazard, color=metastized))+
+  geom_vline(xintercept = c(0,knots, time_max), alpha=.5, color='gray', linetype='dashed')+
+  geom_rug(data=tibble(times=times[is_censored]), aes(x=times), col="green",alpha=0.5, size=1.25)+
+  geom_rug(data=tibble(times=times[!is_censored]), aes(x=times), col="red",alpha=0.5, size=1.25)+
+  scale_fill_manual(values=cbbPalette)+
+  scale_colour_manual(values=cbbPalette)
+  hazards_df
 ```
 
 

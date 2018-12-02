@@ -6,6 +6,11 @@ functions {
         return s ;
     }
 
+    matrix hazard_mspline_t(real[] m_spline_basis_evals, matrix X, matrix gammas, real[] intercepts, matrix betas) {
+        int npatients = rows(X);
+        return rep_matrix(to_row_vector(m_spline_basis_evals) * gammas, npatients).*exp(X*betas + rep_matrix(to_row_vector(intercepts), npatients));
+    }
+    
     // gammas has nbasis rows and nsamples columns
     // betas has ncovariates rows and nsamples columns!!!
     matrix surv_mspline_t(real[] i_spline_basis_evals, matrix X, matrix gammas, real[] intercepts, matrix betas) {
