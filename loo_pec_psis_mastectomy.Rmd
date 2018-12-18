@@ -2,7 +2,7 @@
 title: "Leave-One-Out Brier Score for Bayesian Survival Models"
 subtitle: "Using Pareto smoothed importance sampling"
 author: "Eren M. El&ccedil;i"
-date: "2018-12-02"
+date: "2018-12-17"
 output:
   html_document:
     theme: simplex
@@ -13,7 +13,7 @@ output:
     df_print: paged
 ---
 
-In this short case study I show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and develop an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. Part of the functionality is provided through exposed Stan code.
+In this short case study we show how to implement an estimator for the leave-one-out (LOO) version of the Expected Brier Score for Bayesian Survival Models, with right-censored event times. We utilize  the so-called "inverse of probability of censoring weighted estimator" and use an efficient computation method to calculate LOO for all individuals based on pareto-smoothed importance sampling. 
 
 References:
 
@@ -107,7 +107,7 @@ This model allows for a time-dependent baseline hazard using M-splines
 
 ```{r, warning=FALSE, message=FALSE, error=FALSE,fig.align='center'}
 knots <- quantile(times[!msk_censored], probs = c(.05, .35, .65, .95))
-dirichlet_alpha<- 1
+dirichlet_alpha<- 2
 nknots <- length(knots)
 mspline_degree<-3
 
@@ -191,7 +191,7 @@ stan_data <- list(N_uncensored=N-N_censored,
                   m_spline_basis_evals_uncensored=m_spline_basis_evals_uncensored, 
                   i_spline_basis_evals_uncensored=i_spline_basis_evals_uncensored,
                   i_spline_basis_evals_censored=i_spline_basis_evals_censored,
-                  alpha=1.
+                  alpha=dirichlet_alpha
 )
 
 fit <- sampling(sm, data=stan_data, seed=42, chains=4, cores=2, iter=4000)
@@ -223,7 +223,7 @@ broom::tidy(fit2, conf.int=T) %>% filter(! term %in%  sprintf("log_lik[%d]", 1:N
 
 ### M-Spline
 
-```{r surv_mspline,fig.align='center'}
+```{r hazard_mspline,fig.align='center'}
 intercepts <- as.vector(post2[,,"intercept"])
 betas <- t(matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)))
 gammas <- t(matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis))
@@ -357,8 +357,10 @@ surv_df <- dplyr::bind_rows(
 
 # Brier Score (LOO-PSIS)
 
+## Introduction
+
 Denote by $\mathbf{T}_{-i}$ the $N-1$ dimensional vector of observed times (censored and uncensored) for all individuals, except for individual $i$. Write 
-$S_i(t\vert \mathbf{T}_{-i})$ for the expected survival probability of patient $i$ at time $t$, where the expectation is with respect to the posterior over all latent model parameters $\theta$, given observations $\mathbf{T}_i$. 
+$S_i(t\vert \mathbf{T}_{-i})$ for the expected survival probability of patient $i$ at time $t$, where the expectation is with respect to the posterior over all latent model parameters $\theta$, given observations $\mathbf{T}_{-i}$. 
 
 Now, suppose $\{\theta_s\}_{s=1\dots S}$ is a (correlated) sequence of latent model parameters drawn from the posterior, given *all* observed times (including the one from individual $i$). We then can approximate $S_i(t\vert \mathbf{T}_{-i})$  as follows
 
@@ -391,28 +393,9 @@ $$
 
 Here $\delta_i$ is the event indicator, i.e. $\delta_i = 1$ iff individual experienced the event and $0$ otherwise. Moreover $G_i(t)$ is the probability that the censoring time $C_i$ is exceeds $t$ for patient $i$. Note that for both the event and censoring survival functions we indicate a potential dependence on covariates by adding the index $i$. $G_i(t)$ can be obtained by fitting, for example, a Cox model to the data with reversed censoring indicators. By introducing a weighting based on $G_i$ we guarantee that the estimator's bias $\Omega(t)$ does not depent on the survival model (otherwise model comparison would be hard), see Gerds et al. It can be shown, see Gerds et al., that under weaks conditions, $\Omega(t)$ is a uniformly consistent estimator for the expected mean squared error in time (aka Brier score).
 
-For both models, the constant and time dependent baseline hazard, we provide R functions `surv_const_loo` and `surv_mspline_loo` which can be used to calculate $S_i(t\vert \mathbf{T}_{-i})$ for all $i$ and required times $t$. This matrix $\{S_i(t\vert \mathbf{T}_{-i})\}_{i,t}$ can then be passed to the function `pec()` part of the  `pec` R Package, which calculates $\Omega(t)$ and provides ways to choose $G_i$, see the code below.
+We provide function `surv_loo` (which is survival model agnostic) that can be used to calculate $S_i(t\vert \mathbf{T}_{-i})$ for all $i$ and required times $t$, based on estimates of $S_i(t\vert \theta_s)$. This matrix $\{S_i(t\vert \mathbf{T}_{-i})\}_{i,t}$ can then be passed to the function `pec()` part of the  `pec` R Package, which calculates $\Omega(t)$ and provides ways to choose $G_i$, see the code below.
 
-```{r, fig.align='center', eval=FALSE, echo=FALSE}
-times_pec <- seq(0, time_max, length.out = 100)
-log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
-r_eff <- relative_eff(exp(log_ratios))
-psis_result <- psis(log_ratios, r_eff = r_eff)
-w <- weights(psis_result, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
-survs_loo1 <- surv_const_loo(times_pec,
-                            X,
-                            as.vector(post[,,"intercept"]),
-                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
-                            t(w)
-                            )
-survs1 <- surv_const_loo(times_pec,
-                            X,
-                            as.vector(post[,,"intercept"]),
-                            matrix(post[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post)[1]*dim(post)[2], ncol(X)),
-                            matrix(rep(1, dim(w)[1]*dim(w)[2]), nrow = dim(w)[2], byrow = T)/dim(w)[1]
-                            )
-```
-
+## Comparison 
 
 ```{r, fig.align='center'}
 intercepts <- as.vector(post[,,"intercept"])
@@ -426,31 +409,36 @@ log_ratios <- -post[,,sprintf("log_lik[%d]",1:N)]
 r_eff <- relative_eff(exp(log_ratios))
 psis_result <- psis(log_ratios, r_eff = r_eff)
 w <- matrix(weights(psis_result, log=FALSE), nrow=dim(X)[1], byrow = T) # TODO: check if this is correct reshaping!
-survs_loo1 <- do.call(cbind, purrr::map(times_pec,~surv_loo(surv_const_t(., X, intercepts, betas), w)))
+survs_loo_psis1 <- do.call(cbind, purrr::map(times_pec,~surv_loo(surv_const_t(., X, intercepts, betas), w)))
 ```
 
-```{r, fig.align='center', echo=FALSE, eval=FALSE}
-i_spline_basis_evals <- iSpline(times_pec, knots=knots, degree=mspline_degree,
-                                intercept=FALSE, Boundary.knots = c(0, time_max))
-log_ratios2 <- -post2[,,sprintf("log_lik[%d]",1:N)]
-r_eff2 <- relative_eff(exp(log_ratios2))
-psis_result2 <- psis(log_ratios2, r_eff = r_eff2)
-w2 <- weights(psis_result2, log=FALSE) #note that colSums(w2) = rep(1, dim(w2)[2])
-survs_loo2 <- surv_mspline_loo(i_spline_basis_evals,
-                            X,
-                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
-                            as.vector(post2[,,"intercept"]),
-                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
-                            t(w2)
-                            )
+```{r, fig.align='center'}
+# This calculates the true Loo
+do_loo <- function(idx) {
+  df_ <- slice(df, -idx)
+  N_ <- nrow(df_)
+  X_ <- as.matrix(as.integer(pull(df_, metastized))-1)
+  is_censored_ <- pull(df_,event)==0
+  times_ <- pull(df_,time)
+  msk_censored_ <- is_censored_ == 1
+  N_censored_ <- sum(msk_censored_)
 
-survs2 <- surv_mspline_loo(i_spline_basis_evals,
-                            X,
-                            matrix(post2[,,sprintf("gammas[%d]", 1:nbasis)], dim(post2)[1]*dim(post2)[2], nbasis),
-                            as.vector(post2[,,"intercept"]),
-                            matrix(post2[,,sprintf("betas[%d]" ,1:ncol(X))], dim(post2)[1]*dim(post2)[2], ncol(X)),
-                            matrix(rep(1, dim(w2)[1]*dim(w2)[2]), nrow = dim(w2)[2], byrow = T)/dim(w2)[1]
-                            )
+  stan_data_ <- list(N_uncensored=N_-N_censored_, 
+                    N_censored=N_censored_, 
+                    X_censored=as.matrix(X_[msk_censored_,]),
+                    X_uncensored=as.matrix(X_[!msk_censored_,]),
+                    times_censored=times_[msk_censored_],
+                    times_uncensored = times_[!msk_censored_],
+                    NC=ncol(X_)
+  )
+  fit_ <- sampling(sm, data=stan_data_, seed=42, chains=4, cores=2, iter=4000)
+  post_ <- as.array(fit_)
+  intercepts_ <- as.vector(post_[,,"intercept"])
+  betas_ <- t(matrix(post_[,,sprintf("betas[%d]" ,1:ncol(X_))], dim(post_)[1]*dim(post_)[2], ncol(X_)))
+  purrr::map_dbl(times_pec, ~as.vector(rowMeans(surv_const_t(., as.matrix(X[idx]), intercepts_, betas_))))
+
+}
+survs_loo1 <- do.call(rbind, purrr::map(1:nrow(df), do_loo))
 ```
 
 
@@ -471,13 +459,56 @@ psis_result2 <- psis(log_ratios2, r_eff = r_eff2)
 w2<- matrix(weights(psis_result2, log=FALSE), nrow=dim(X)[1], byrow = T) # TODO: check if this is correct reshaping!
 
 
-survs_loo2 <- do.call(cbind, purrr::map(1:length(times_pec),~surv_loo(surv_mspline_t(i_spline_basis_evals[.,], X, gammas, intercepts, betas), w2)))
+survs_loo_psis2 <- do.call(cbind, purrr::map(1:length(times_pec),~surv_loo(surv_mspline_t(i_spline_basis_evals[.,], X, gammas, intercepts, betas), w2)))
 ```
 
+```{r, fig.align='center'}
+# This calculates the true Loo
+do_loo <- function(idx) {
+  df_ <- slice(df, -idx)
+  N_ <- nrow(df_)
+  X_ <- as.matrix(as.integer(pull(df_, metastized))-1)
+  is_censored_ <- pull(df_,event)==0
+  times_ <- pull(df_,time)
+  msk_censored_ <- is_censored_ == 1
+  N_censored_ <- sum(msk_censored_)
+  i_spline_basis_evals <- iSpline(times_, knots=knots, degree=mspline_degree,
+                                  intercept=FALSE, Boundary.knots = c(0, time_max))
+  m_spline_basis_evals <- deriv(i_spline_basis_evals)
+  i_spline_basis_evals_censored <- i_spline_basis_evals[msk_censored_,]
+  i_spline_basis_evals_uncensored <- i_spline_basis_evals[!msk_censored_,]
+  m_spline_basis_evals_uncensored <- m_spline_basis_evals[!msk_censored_,]
+  nbasis <- dim(i_spline_basis_evals_censored)[2]
+  stan_data_ <- list(N_uncensored=N_-N_censored_, 
+                    N_censored=N_censored_, 
+                    X_censored=as.matrix(X_[msk_censored_,]),
+                    X_uncensored=as.matrix(X_[!msk_censored_,]),
+                    times_censored=times_[msk_censored_],
+                    times_uncensored = times_[!msk_censored_],
+                    NC=ncol(X_),
+                    m=nbasis,
+                    m_spline_basis_evals_uncensored=m_spline_basis_evals_uncensored, 
+                    i_spline_basis_evals_uncensored=i_spline_basis_evals_uncensored,
+                    i_spline_basis_evals_censored=i_spline_basis_evals_censored,
+                    alpha=dirichlet_alpha
+  )
+  fit_ <- sampling(sm2, data=stan_data_, seed=42, chains=4, cores=2, iter=4000)
+  post_ <- as.array(fit_)
+  intercepts_ <- as.vector(post_[,,"intercept"])
+  betas_ <- t(matrix(post_[,,sprintf("betas[%d]" ,1:ncol(X_))], dim(post_)[1]*dim(post_)[2], ncol(X_)))
+  gammas_ <- t(matrix(post_[,,sprintf("gammas[%d]", 1:nbasis)], dim(post_)[1]*dim(post_)[2], nbasis))
+  i_spline_basis_evals_ <- iSpline(times_pec, knots=knots, degree=mspline_degree,
+                                intercept=FALSE, Boundary.knots = c(0, time_max))
+  purrr::map_dbl(1:length(times_pec), ~as.vector(rowMeans(surv_mspline_t(i_spline_basis_evals_[.,], as.matrix(X[idx]), gammas_,intercepts_, betas_))))
+}
+survs_loo2 <- do.call(rbind, purrr::map(1:nrow(df), do_loo))
+```
 
 ```{r, fig.align='center'}
-pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
+pec_rslt <- pec(list("MSpline-PSIS-Loo"=survs_loo_psis2,
+                     "MSpline-Loo"=survs_loo2,
                      "Constant-Loo"=survs_loo1,
+                     "Constant-PSIS-Loo"=survs_loo_psis1,
                      "MSpline"=survs2,
                      "Constant"=survs1
                      ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
@@ -486,7 +517,9 @@ pec_rslt <- pec(list("MSpline-Loo"=survs_loo2,
                 verbose=TRUE)
 
 df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
-  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo")) %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-PSIS-Loo"]], model="Constant-PSIS-Loo")) %>%
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-PSIS-Loo"]], model="MSpline-PSIS-Loo")) %>%
+    bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo")) %>%
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant")) %>%
   bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline")) %>%
 
@@ -517,14 +550,17 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 
 ```{r, fig.align='center'}
 pec_rslt <- pec(list("Constant-Loo"=survs_loo1, 
-                     "Constant"=survs1
+                     "Constant"=survs1,
+                     "Constant-PSIS-Loo"=survs_loo_psis1
                      ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
 
 df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-Loo"]], model="Constant-Loo") %>%
-  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant"))
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant"]], model="Constant")) %>%
+    bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["Constant-PSIS-Loo"]], model="Constant-PSIS-Loo"))
+
 
 ggplot(data=df_pec) +
   geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
@@ -543,14 +579,17 @@ purrr::map(unique(df_pec$model),trsf_bs) %>%
 
 ```{r, fig.align='center'}
 pec_rslt <- pec(list("MSpline-Loo"=survs_loo2, 
-                     "MSpline"=survs2
+                     "MSpline"=survs2,
+                     "MSpline-PSIS-Loo"= survs_loo_psis2
                      ), formula =Surv(time,event)~metastized , data=df, exact = F, times = times_pec,cens.model="marginal",
                 splitMethod="none",
                 B=0,
                 verbose=TRUE)
 
 df_pec <- tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-Loo"]], model="MSpline-Loo") %>%
-  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline"))
+  bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline-PSIS-Loo"]], model="MSpline-PSIS-Loo")) %>%
+    bind_rows(tibble(time=pec_rslt$time, bs=pec_rslt$AppErr[["MSpline"]], model="MSpline"))
+
 
 ggplot(data=df_pec) +
   geom_hline(yintercept=.25,alpha=.5, color='gray', linetype='dashed')+
